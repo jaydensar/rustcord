@@ -2,19 +2,29 @@ mod prisma;
 
 use axum::{
     extract::Extension,
+    headers::{authorization::Bearer, Authorization},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
+    Json, Router, TypedHeader,
 };
 use hmac_sha256::Hash;
-use jsonwebtoken::{EncodingKey, Header};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation};
 use load_dotenv::load_dotenv;
-use prisma::*;
+use prisma::{user::username, *};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+// on jwts:
+// generate access token and refresh token on login
+// access token expires in 15 minutes
+// refresh token expires in 7 days, store refresh token
+// when access token expires, client asks for new access token using the refresh token
+// the refresh token expires on use, a new one is generated that lasts another 7 days
+
+// todo add error handling
 
 struct State {
     prisma: PrismaClient,
@@ -33,11 +43,12 @@ async fn main() {
         .route("/", get(root))
         .route("/register", post(register))
         .route("/login", post(login))
+        .route("/me", get(me))
         .layer(Extension(shared_state));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
 
-    println!("listening on {}", addr);
+    println!("Server started.\nListening on {}", addr);
 
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
@@ -95,9 +106,10 @@ async fn register(
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TokenData {
+struct Claim {
     username: String,
     id: String,
+    exp: usize,
 }
 
 async fn login(
@@ -138,14 +150,13 @@ async fn login(
         );
     }
 
-    let token_data = TokenData {
-        username: user_data.username.to_owned(),
-        id: user_data.id.to_owned(),
-    };
-
-    let token = jsonwebtoken::encode(
+    let access_token = jsonwebtoken::encode(
         &Header::default(),
-        &token_data,
+        &Claim {
+            username: user_data.username.to_owned(),
+            id: user_data.id.to_owned(),
+            exp: (chrono::offset::Utc::now().timestamp() + (15 * 60)) as usize,
+        },
         &EncodingKey::from_secret(env!("JWT_TOKEN_SECRET").as_ref()),
     )
     .unwrap();
@@ -155,7 +166,40 @@ async fn login(
         Json(json!({
             "id": user_data.id,
             "username": user_data.username,
-            "token": token
+            "token": access_token
+        })),
+    )
+}
+
+async fn me(
+    Extension(state): Extension<Arc<State>>,
+    TypedHeader(authorization): TypedHeader<Authorization<Bearer>>,
+) -> impl IntoResponse {
+    let prisma = &state.prisma;
+
+    let jwt_data = jsonwebtoken::decode::<Claim>(
+        authorization.token(),
+        &DecodingKey::from_secret(env!("JWT_TOKEN_SECRET").as_ref()),
+        &Validation::new(jsonwebtoken::Algorithm::HS256),
+    )
+    .unwrap();
+
+    let user_query = prisma
+        .user()
+        .find_unique(username::equals(jwt_data.claims.username))
+        .with(user::WithParam::Memberships(vec![]))
+        .exec()
+        .await
+        .unwrap()
+        .unwrap();
+
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "id": user_query.id,
+            "username": user_query.username,
+            "createdAt": user_query.created_at.to_string(),
+            "memberships": user_query.memberships().unwrap()
         })),
     )
 }
