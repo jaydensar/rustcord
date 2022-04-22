@@ -5,20 +5,18 @@ datasource db {
 
 generator client {
     provider = "cargo prisma"
-    output   = "../../server/src/prisma.rs"
+    output   = "./server/src/prisma.rs"
 }
 
 model User {
-    id            String   @id @default(uuid())
-    username      String
-    password      String
-    discriminator String
-    createdAt     DateTime @default(now())
+    id        String   @id @default(uuid())
+    username  String   @unique
+    password  String
+    createdAt DateTime @default(now())
 
     memberships GuildMembership[]
     messages    Message[]
 
-    @@unique([username, discriminator])
 }
 
 model Guild {
