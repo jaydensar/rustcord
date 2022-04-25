@@ -12,16 +12,26 @@ CREATE TABLE "User" (
 CREATE TABLE "Guild" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "Guild_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
+CREATE TABLE "Invite" (
+    "code" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "guildId" TEXT NOT NULL,
+
+    CONSTRAINT "Invite_pkey" PRIMARY KEY ("code")
+);
+
+-- CreateTable
 CREATE TABLE "GuildMembership" (
+    "nickname" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "userId" TEXT NOT NULL,
     "guildId" TEXT NOT NULL,
-    "nickname" TEXT,
 
     CONSTRAINT "GuildMembership_pkey" PRIMARY KEY ("userId","guildId")
 );
@@ -29,6 +39,8 @@ CREATE TABLE "GuildMembership" (
 -- CreateTable
 CREATE TABLE "Channel" (
     "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "guildId" TEXT NOT NULL,
 
     CONSTRAINT "Channel_pkey" PRIMARY KEY ("id")
@@ -38,6 +50,7 @@ CREATE TABLE "Channel" (
 CREATE TABLE "Message" (
     "id" TEXT NOT NULL,
     "content" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "authorId" TEXT NOT NULL,
     "channelId" TEXT NOT NULL,
 
@@ -46,6 +59,9 @@ CREATE TABLE "Message" (
 
 -- CreateIndex
 CREATE UNIQUE INDEX "User_username_key" ON "User"("username");
+
+-- AddForeignKey
+ALTER TABLE "Invite" ADD CONSTRAINT "Invite_guildId_fkey" FOREIGN KEY ("guildId") REFERENCES "Guild"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "GuildMembership" ADD CONSTRAINT "GuildMembership_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;

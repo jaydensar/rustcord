@@ -22,26 +22,37 @@ model User {
 model Guild {
     id        String   @id @default(uuid())
     name      String
-    createdAt DateTime
+    createdAt DateTime @default(now())
 
     members  GuildMembership[]
     channels Channel[]
+    invites  Invite[]
+}
+
+model Invite {
+    code      String   @id @default(cuid())
+    createdAt DateTime @default(now())
+
+    guild   Guild  @relation(fields: [guildId], references: [id])
+    guildId String
 }
 
 model GuildMembership {
+    nickname  String?
+    createdAt DateTime @default(now())
+
     user    User   @relation(fields: [userId], references: [id])
     guild   Guild  @relation(fields: [guildId], references: [id])
     userId  String
     guildId String
 
-    nickname String?
-
     @@id([userId, guildId])
 }
 
 model Channel {
-    id   String @id @default(uuid())
-    name String
+    id        String   @id @default(uuid())
+    name      String
+    createdAt DateTime @default(now())
 
     messages Message[]
     guild    Guild     @relation(fields: [guildId], references: [id])
@@ -49,9 +60,9 @@ model Channel {
 }
 
 model Message {
-    id      String @id @default(uuid())
-    content String
-    // createdAt DateTime @default(now())
+    id        String   @id @default(uuid())
+    content   String
+    createdAt DateTime @default(now())
 
     author    User    @relation(fields: [authorId], references: [id])
     channel   Channel @relation(fields: [channelId], references: [id])

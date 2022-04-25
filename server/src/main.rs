@@ -279,8 +279,6 @@ async fn get_user_guilds(
 
     let guilds_data = guilds_query.unwrap();
 
-    println!("{:?}", guilds_data);
-
     (StatusCode::OK, Json(json!(guilds_data)))
 }
 
@@ -357,7 +355,7 @@ async fn get_channel_messages(
         messages_user_data.push(json!({
             "id": message.id,
             "content": message.content,
-            // "createdAt": message.created_at.to_string(),
+            "created_at": message.created_at.to_rfc3339(),
             "author": {
                 "id": author.id,
                 "username": author.username,

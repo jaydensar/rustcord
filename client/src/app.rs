@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use eframe::{
     egui::{self, RichText, ScrollArea, Spinner, TextEdit, TextStyle},
     epaint::Color32,
@@ -27,16 +28,17 @@ struct Channel {
     id: String,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct User {
     id: String,
     username: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 struct Message {
     id: String,
     content: String,
+    created_at: String,
     author: User,
 }
 
@@ -171,13 +173,19 @@ impl epi::App for RustCord {
                 if ui.button(channel.name.to_owned()).clicked() {
                     *current_channel = Some(channel.clone());
 
-                    let messages: Vec<Message> = http
+                    let mut messages: Vec<Message> = http
                         .get(format!("{}/channels/{}/messages", INSTANCE_URL, channel.id))
                         .header("Authorization", format!("Bearer {}", account.token))
                         .send()
                         .unwrap()
                         .json()
                         .unwrap();
+
+                    messages.sort_by(|a, b| {
+                        DateTime::parse_from_rfc3339(&a.created_at)
+                            .unwrap()
+                            .cmp(&DateTime::parse_from_rfc3339(&b.created_at).unwrap())
+                    });
 
                     message_cache.insert(channel.id.to_owned(), messages);
                 };
@@ -214,6 +222,7 @@ impl epi::App for RustCord {
             ScrollArea::vertical()
                 .stick_to_bottom()
                 .auto_shrink([false; 2])
+                .max_height(ui.max_rect().height() - row_height * 3.5)
                 .show_rows(ui, row_height, num_rows, |ui, row_range| {
                     for message in &current_message_cache[row_range] {
                         ui.horizontal(|ui| {
@@ -226,35 +235,35 @@ impl epi::App for RustCord {
                     }
                 });
 
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                let textbox = ui.add(
-                    TextEdit::multiline(inputs.get_mut("chatbox").unwrap())
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(1)
-                        .hint_text(format!("Message #{}", current_channel.name)),
-                );
-                // enter sends message, shift+enter creates a new line
-                if textbox.has_focus()
-                    && ctx.input().key_pressed(egui::Key::Enter)
-                    && !ctx.input().modifiers.shift
-                {
-                    let mut data = HashMap::new();
-                    data.insert("content", inputs.get("chatbox").unwrap().trim());
+            let textbox = ui.add(
+                TextEdit::multiline(inputs.get_mut("chatbox").unwrap())
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(1)
+                    .hint_text(format!("Message #{}", current_channel.name)),
+            );
+            // enter sends message, shift+enter creates a new line
+            if textbox.has_focus()
+                && ctx.input().key_pressed(egui::Key::Enter)
+                && !ctx.input().modifiers.shift
+            {
+                let mut data = HashMap::new();
+                data.insert("content", inputs.get("chatbox").unwrap().trim());
 
-                    ui.with_layout(egui::Layout::right_to_left(), |ui| ui.add(Spinner::new()));
+                ui.with_layout(egui::Layout::right_to_left(), |ui| ui.add(Spinner::new()));
 
-                    http.post(format!(
-                        "{}/channels/{}/messages",
-                        INSTANCE_URL, current_channel.id
-                    ))
-                    .header("Authorization", format!("Bearer {}", account.token))
-                    .json(&data)
-                    .send()
-                    .ok();
+                http.post(format!(
+                    "{}/channels/{}/messages",
+                    INSTANCE_URL, current_channel.id
+                ))
+                .header("Authorization", format!("Bearer {}", account.token))
+                .json(&data)
+                .send()
+                .ok();
 
-                    *inputs.get_mut("chatbox").unwrap() = "".to_owned();
-                }
-            });
+                *inputs.get_mut("chatbox").unwrap() = "".to_owned();
+            }
+
+            // ui.label("test is typing...");
         });
     }
 
