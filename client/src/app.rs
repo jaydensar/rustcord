@@ -1,11 +1,14 @@
 use chrono::DateTime;
+use crossbeam_channel::{unbounded, Receiver};
 use eframe::{
     egui::{self, RichText, ScrollArea, Spinner, TextEdit, TextStyle},
     epaint::Color32,
     epi,
 };
-use serde::Deserialize;
-use std::collections::HashMap;
+use reqwest::header::HeaderValue;
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, thread};
+use tungstenite::{client::IntoClientRequest, connect};
 
 #[derive(Deserialize)]
 struct Account {
@@ -22,13 +25,22 @@ struct Guild {
     channels: Vec<Channel>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SocketMessagePayload {
+    content: String,
+    author: User,
+    channel_id: String,
+    created_at: String,
+    id: String,
+}
+
 #[derive(Deserialize, Clone)]
 struct Channel {
     name: String,
     id: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct User {
     id: String,
     username: String,
@@ -52,6 +64,7 @@ pub struct RustCord {
     guilds: Vec<Guild>,
     account: Option<Account>,
     http: reqwest::blocking::Client,
+    socket_channel: Option<Receiver<String>>,
 }
 
 const INSTANCE_URL: &str = "http://localhost:3000";
@@ -67,10 +80,10 @@ impl epi::App for RustCord {
             guilds,
             account,
             http,
+            socket_channel,
         } = self;
 
         if account.is_none() {
-            egui::CentralPanel::default().show(ctx, |_| {});
             egui::Window::new("Login or Register").show(ctx, |ui| {
                 ui.add(
                     TextEdit::singleline(inputs.get_mut("username").unwrap())
@@ -111,6 +124,25 @@ impl epi::App for RustCord {
                             .unwrap()
                             .json()
                             .unwrap();
+
+                        let mut request = "ws://localhost:3000/ws".into_client_request().unwrap();
+
+                        request.headers_mut().append(
+                            "Authorization",
+                            HeaderValue::from_str(&self.account.as_ref().unwrap().token).unwrap(),
+                        );
+
+                        let (mut sock, _response) = connect(request).unwrap();
+
+                        let (s, r) = unbounded();
+
+                        *socket_channel = Some(r);
+
+                        thread::spawn(move || loop {
+                            let socket_msg = sock.read_message().unwrap().into_text().unwrap();
+
+                            s.send(socket_msg).unwrap();
+                        });
                     }
 
                     if ui.button("Register").clicked() {
@@ -123,12 +155,14 @@ impl epi::App for RustCord {
                         http.post(format!("{}/{}", INSTANCE_URL, "register"))
                             .json(&data)
                             .send()
-                            .ok();
+                            .unwrap();
                     }
                 });
             });
             return;
         }
+
+        let socket = socket_channel.as_ref().unwrap();
 
         let account = self.account.as_ref().unwrap();
 
@@ -191,6 +225,32 @@ impl epi::App for RustCord {
                 };
             }
 
+            let msg = socket.try_recv();
+
+            if let Ok(msg) = msg {
+                let data: SocketMessagePayload = serde_json::from_str(&msg).unwrap();
+
+                if message_cache.contains_key(&data.channel_id) {
+                    let messages = message_cache.get_mut(&data.channel_id).unwrap();
+
+                    messages.push(Message {
+                        author: User {
+                            id: data.author.id,
+                            username: data.author.username,
+                        },
+                        content: data.content,
+                        created_at: data.created_at,
+                        id: data.id,
+                    });
+
+                    messages.sort_by(|a, b| {
+                        DateTime::parse_from_rfc3339(&a.created_at)
+                            .unwrap()
+                            .cmp(&DateTime::parse_from_rfc3339(&b.created_at).unwrap())
+                    });
+                }
+            }
+
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -251,19 +311,18 @@ impl epi::App for RustCord {
 
                 ui.with_layout(egui::Layout::right_to_left(), |ui| ui.add(Spinner::new()));
 
-                http.post(format!(
-                    "{}/channels/{}/messages",
-                    INSTANCE_URL, current_channel.id
-                ))
-                .header("Authorization", format!("Bearer {}", account.token))
-                .json(&data)
-                .send()
-                .ok();
+                let res = http
+                    .post(format!(
+                        "{}/channels/{}/messages",
+                        INSTANCE_URL, current_channel.id
+                    ))
+                    .header("Authorization", format!("Bearer {}", account.token))
+                    .json(&data)
+                    .send()
+                    .unwrap();
 
                 *inputs.get_mut("chatbox").unwrap() = "".to_owned();
             }
-
-            // ui.label("test is typing...");
         });
     }
 

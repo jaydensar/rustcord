@@ -47,24 +47,27 @@ struct MessagePayload {
     content: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct SocketMessagePayload {
     content: String,
     author: User,
+    channel_id: String,
+    created_at: String,
+    id: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct User {
     id: String,
     username: String,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum SocketMessageType {
     NewMessage(SocketMessagePayload, String),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct SocketPayload {
     message: SocketMessageType,
 }
@@ -437,6 +440,25 @@ async fn post_channel_messages(
 
     let message_data = message_query.unwrap();
 
+    state
+        .tx
+        .send(SocketPayload {
+            message: SocketMessageType::NewMessage(
+                SocketMessagePayload {
+                    author: User {
+                        id: message_data.clone().author_id,
+                        username: user_data.username,
+                    },
+                    content: message_data.clone().content,
+                    channel_id: message_data.clone().channel_id,
+                    created_at: message_data.created_at.to_rfc3339(),
+                    id: message_data.clone().id,
+                },
+                channel_data.id,
+            ),
+        })
+        .unwrap();
+
     (StatusCode::OK, Json(json!(message_data)))
 }
 
@@ -444,8 +466,8 @@ async fn socket_upgrade(
     ws: WebSocketUpgrade,
     Extension(state): Extension<Arc<State>>,
     Extension(claims): Extension<Claims>,
-) {
-    ws.on_upgrade(|socket| websocket(socket, state, claims));
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| websocket(socket, state, claims))
 }
 
 async fn websocket(mut socket: WebSocket, state: Arc<State>, claims: Claims) {
@@ -491,7 +513,7 @@ async fn websocket(mut socket: WebSocket, state: Arc<State>, claims: Claims) {
                     socket
                         .send(axum::extract::ws::Message::Text(socket_msg.to_string()))
                         .await
-                        .unwrap();
+                        .ok();
                 }
             }
         }
