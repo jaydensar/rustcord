@@ -1,54 +1,105 @@
 mod prisma;
 
 use axum::{
-    extract::Extension,
-    headers::{authorization::Bearer, Authorization},
-    http::StatusCode,
+    extract::{
+        ws::{WebSocket, WebSocketUpgrade},
+        Extension, Path,
+    },
+    http::{self, Request, StatusCode},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
-    Json, Router, TypedHeader,
+    Json, Router,
 };
 use hmac_sha256::Hash;
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use load_dotenv::load_dotenv;
-use prisma::{user::username, *};
+use prisma::PrismaClient;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
+use tokio::sync::broadcast;
 
-// on jwts:
-// generate access token and refresh token on login
-// access token expires in 15 minutes
-// refresh token expires in 7 days, store refresh token
-// when access token expires, client asks for new access token using the refresh token
-// the refresh token expires on use, a new one is generated that lasts another 7 days
+load_dotenv!();
 
 // todo add error handling
 
 struct State {
     prisma: PrismaClient,
+    tx: broadcast::Sender<SocketPayload>,
 }
 
-load_dotenv!();
+#[derive(Clone, Serialize, Deserialize)]
+struct Claims {
+    username: String,
+    id: String,
+    exp: usize,
+}
+
+#[derive(Deserialize)]
+struct AuthPayload {
+    username: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct MessagePayload {
+    content: String,
+}
+
+#[derive(Clone, Serialize)]
+struct SocketMessagePayload {
+    content: String,
+    author: User,
+}
+
+#[derive(Clone, Serialize)]
+struct User {
+    id: String,
+    username: String,
+}
+
+#[derive(Clone)]
+enum SocketMessageType {
+    NewMessage(SocketMessagePayload, String),
+}
+
+#[derive(Clone)]
+struct SocketPayload {
+    message: SocketMessageType,
+}
 
 #[tokio::main]
 async fn main() {
     let client = prisma::new_client().await;
     let prisma = client.unwrap();
 
-    let shared_state = Arc::new(State { prisma });
+    let (tx, _rx) = broadcast::channel(100);
 
-    let app = Router::new()
+    let shared_state = Arc::new(State { prisma, tx });
+
+    let router = Router::new()
         .route("/", get(root))
         .route("/register", post(register))
-        .route("/login", post(login))
-        .route("/me", get(me))
+        .route("/login", post(login));
+
+    let auth_router = Router::new()
+        .route("/users/me", get(me))
+        .route("/users/me/guilds", get(get_user_guilds))
+        .route("/channels/:channel_id/messages", get(get_channel_messages))
+        .route(
+            "/channels/:channel_id/messages",
+            post(post_channel_messages),
+        )
+        .route("/ws", get(socket_upgrade))
+        .route_layer(middleware::from_fn(auth));
+
+    let app = Router::new()
+        .merge(router)
+        .merge(auth_router)
         .layer(Extension(shared_state));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-
-    println!("Server started.\nListening on {}", addr);
 
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
@@ -56,14 +107,30 @@ async fn main() {
         .unwrap();
 }
 
-async fn root() -> &'static str {
-    "rc_api v0.1.0"
+// jwt auth middleware
+async fn auth<B>(mut req: Request<B>, next: Next<B>) -> impl IntoResponse {
+    let auth_header = req
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|header| header.to_str().ok());
+
+    let jwt_data = jsonwebtoken::decode::<Claims>(
+        auth_header.unwrap_or("").replace("Bearer ", "").as_str(),
+        &DecodingKey::from_secret(env!("JWT_SECRET").as_ref()),
+        &Validation::new(Algorithm::HS256),
+    );
+
+    match jwt_data {
+        Ok(data) => {
+            req.extensions_mut().insert(data.claims);
+            next.run(req).await
+        }
+        Err(_) => StatusCode::UNAUTHORIZED.into_response(),
+    }
 }
 
-#[derive(Deserialize)]
-struct AuthPayload {
-    username: String,
-    password: String,
+async fn root() -> &'static str {
+    "rc_api v0.1.0"
 }
 
 async fn register(
@@ -79,8 +146,8 @@ async fn register(
     let created_user = prisma
         .user()
         .create(
-            user::username::set(payload.username),
-            user::password::set(hex::encode(hasher.finalize())),
+            prisma::user::username::set(payload.username),
+            prisma::user::password::set(hex::encode(hasher.finalize())),
             vec![],
         )
         .exec()
@@ -105,13 +172,6 @@ async fn register(
     )
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Claim {
-    username: String,
-    id: String,
-    exp: usize,
-}
-
 async fn login(
     Extension(state): Extension<Arc<State>>,
     Json(payload): Json<AuthPayload>,
@@ -126,16 +186,14 @@ async fn login(
 
     let user_query = prisma
         .user()
-        .find_unique(user::username::equals(payload.username))
+        .find_unique(prisma::user::username::equals(payload.username))
         .exec()
         .await;
-
-    println!("{:?}", user_query);
 
     if user_query.is_err() {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({"error": "User not found."})),
+            Json(json!({"error": "User not found"})),
         );
     }
 
@@ -145,19 +203,19 @@ async fn login(
         return (
             StatusCode::FORBIDDEN,
             Json(json!({
-                "error": "Incorrect Password"
+                "error": "Incorrect password"
             })),
         );
     }
 
     let access_token = jsonwebtoken::encode(
         &Header::default(),
-        &Claim {
+        &Claims {
             username: user_data.username.to_owned(),
             id: user_data.id.to_owned(),
             exp: (chrono::offset::Utc::now().timestamp() + (15 * 60)) as usize,
         },
-        &EncodingKey::from_secret(env!("JWT_TOKEN_SECRET").as_ref()),
+        &EncodingKey::from_secret(env!("JWT_SECRET").as_ref()),
     )
     .unwrap();
 
@@ -173,28 +231,21 @@ async fn login(
 
 async fn me(
     Extension(state): Extension<Arc<State>>,
-    TypedHeader(authorization): TypedHeader<Authorization<Bearer>>,
+    Extension(claims): Extension<Claims>,
 ) -> impl IntoResponse {
     let prisma = &state.prisma;
 
-    let jwt_data = jsonwebtoken::decode::<Claim>(
-        authorization.token(),
-        &DecodingKey::from_secret(env!("JWT_TOKEN_SECRET").as_ref()),
-        &Validation::new(jsonwebtoken::Algorithm::HS256),
-    )
-    .unwrap();
-
     let user_query = prisma
         .user()
-        .find_unique(username::equals(jwt_data.claims.username))
-        .with(user::WithParam::Memberships(vec![]))
+        .find_unique(prisma::user::username::equals(claims.username))
+        .with(prisma::user::WithParam::Memberships(vec![]))
         .exec()
         .await
         .unwrap()
         .unwrap();
 
     (
-        StatusCode::CREATED,
+        StatusCode::OK,
         Json(json!({
             "id": user_query.id,
             "username": user_query.username,
@@ -202,4 +253,249 @@ async fn me(
             "memberships": user_query.memberships().unwrap()
         })),
     )
+}
+
+async fn get_user_guilds(
+    Extension(state): Extension<Arc<State>>,
+    Extension(claims): Extension<Claims>,
+) -> impl IntoResponse {
+    let prisma = &state.prisma;
+
+    let guilds_query = prisma
+        .guild()
+        .find_many(vec![prisma::guild::members::every(vec![
+            prisma::guild_membership::user_id::equals(claims.id),
+        ])])
+        .with(prisma::guild::WithParam::Channels(vec![]))
+        .exec()
+        .await;
+
+    if guilds_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "User not found"})),
+        );
+    }
+
+    let guilds_data = guilds_query.unwrap();
+
+    println!("{:?}", guilds_data);
+
+    (StatusCode::OK, Json(json!(guilds_data)))
+}
+
+async fn get_channel_messages(
+    Path(channel_id): Path<String>,
+    Extension(claims): Extension<Claims>,
+    Extension(state): Extension<Arc<State>>,
+) -> impl IntoResponse {
+    let prisma = &state.prisma;
+
+    let user_query = prisma
+        .user()
+        .find_unique(prisma::user::id::equals(claims.id))
+        .with(prisma::user::WithParam::Memberships(vec![]))
+        .exec()
+        .await;
+
+    if user_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "User not found."})),
+        );
+    }
+
+    let channel_query = prisma
+        .channel()
+        .find_unique(prisma::channel::id::equals(channel_id.to_owned()))
+        .exec()
+        .await;
+
+    if channel_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Channel not found."})),
+        );
+    }
+
+    let channel_data = channel_query.unwrap().unwrap();
+    let user_data = user_query.unwrap().unwrap();
+
+    let user_memberships = user_data.memberships().unwrap();
+
+    let is_member = user_memberships
+        .iter()
+        .any(|membership| membership.guild_id == channel_data.guild_id);
+
+    if !is_member {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "User is not a member of the guild."})),
+        );
+    }
+
+    let messages_query = prisma
+        .message()
+        .find_many(vec![prisma::message::channel_id::equals(channel_id)])
+        .with(prisma::message::WithParam::Author)
+        .exec()
+        .await;
+
+    if messages_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Channel not found."})),
+        );
+    }
+
+    let messages_data = messages_query.unwrap();
+
+    let mut messages_user_data: Vec<serde_json::Value> = vec![];
+
+    for message in messages_data {
+        let author = message.author().unwrap();
+        messages_user_data.push(json!({
+            "id": message.id,
+            "content": message.content,
+            // "createdAt": message.created_at.to_string(),
+            "author": {
+                "id": author.id,
+                "username": author.username,
+            }
+        }));
+    }
+
+    (StatusCode::OK, Json(json!(messages_user_data)))
+}
+
+async fn post_channel_messages(
+    Extension(state): Extension<Arc<State>>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<MessagePayload>,
+    Path(channel_id): Path<String>,
+) -> impl IntoResponse {
+    let prisma = &state.prisma;
+
+    let user_query = prisma
+        .user()
+        .find_unique(prisma::user::id::equals(claims.id))
+        .with(prisma::user::WithParam::Memberships(vec![]))
+        .exec()
+        .await;
+
+    if user_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "User not found."})),
+        );
+    }
+
+    let channel_query = prisma
+        .channel()
+        .find_unique(prisma::channel::id::equals(channel_id.to_owned()))
+        .exec()
+        .await;
+
+    if channel_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Channel not found."})),
+        );
+    }
+
+    let channel_data = channel_query.unwrap().unwrap();
+    let user_data = user_query.unwrap().unwrap();
+
+    let user_memberships = user_data.memberships().unwrap();
+
+    let is_member = user_memberships
+        .iter()
+        .any(|membership| membership.guild_id == channel_data.guild_id);
+
+    if !is_member {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "User is not a member of the guild."})),
+        );
+    }
+
+    let message_query = prisma
+        .message()
+        .create(
+            prisma::message::content::set(payload.content),
+            prisma::message::author::link(prisma::user::UniqueWhereParam::IdEquals(user_data.id)),
+            prisma::message::channel::link(prisma::channel::UniqueWhereParam::IdEquals(channel_id)),
+            vec![],
+        )
+        .exec()
+        .await;
+
+    if message_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Message sending failed"})),
+        );
+    }
+
+    let message_data = message_query.unwrap();
+
+    (StatusCode::OK, Json(json!(message_data)))
+}
+
+async fn socket_upgrade(
+    ws: WebSocketUpgrade,
+    Extension(state): Extension<Arc<State>>,
+    Extension(claims): Extension<Claims>,
+) {
+    ws.on_upgrade(|socket| websocket(socket, state, claims));
+}
+
+async fn websocket(mut socket: WebSocket, state: Arc<State>, claims: Claims) {
+    let mut rx = state.tx.subscribe();
+
+    let mut user_data = state
+        .prisma
+        .user()
+        .find_unique(prisma::user::id::equals(claims.id))
+        .with(prisma::user::WithParam::Memberships(vec![]))
+        .exec()
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut user_guild_data = state
+        .prisma
+        .guild()
+        .find_many(vec![prisma::guild::id::in_vec(
+            user_data
+                .memberships()
+                .unwrap()
+                .iter()
+                .map(|m| m.guild_id.to_owned())
+                .collect(),
+        )])
+        .with(prisma::guild::WithParam::Channels(vec![]))
+        .exec()
+        .await
+        .unwrap();
+
+    loop {
+        let msg = rx.recv().await;
+
+        match msg.unwrap().message {
+            SocketMessageType::NewMessage(message_payload, channel_id) => {
+                if user_guild_data
+                    .iter()
+                    .map(|g| g.channels().unwrap())
+                    .any(|channels| channels.iter().any(|channel| channel.id == channel_id))
+                {
+                    let socket_msg = json!(message_payload);
+                    socket
+                        .send(axum::extract::ws::Message::Text(socket_msg.to_string()))
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    }
 }

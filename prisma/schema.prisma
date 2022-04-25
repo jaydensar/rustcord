@@ -5,7 +5,7 @@ datasource db {
 
 generator client {
     provider = "cargo prisma"
-    output   = "./server/src/prisma.rs"
+    output   = "../server/src/prisma.rs"
 }
 
 model User {
@@ -40,7 +40,8 @@ model GuildMembership {
 }
 
 model Channel {
-    id String @id @default(uuid())
+    id   String @id @default(uuid())
+    name String
 
     messages Message[]
     guild    Guild     @relation(fields: [guildId], references: [id])
@@ -50,6 +51,7 @@ model Channel {
 model Message {
     id      String @id @default(uuid())
     content String
+    // createdAt DateTime @default(now())
 
     author    User    @relation(fields: [authorId], references: [id])
     channel   Channel @relation(fields: [channelId], references: [id])
