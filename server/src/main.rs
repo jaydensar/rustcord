@@ -47,8 +47,14 @@ struct MessagePayload {
     content: String,
 }
 
+#[derive(Deserialize)]
+struct ItemCreatePayload {
+    name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct SocketMessagePayload {
+    msg_type: String,
     content: String,
     author: User,
     channel_id: String,
@@ -65,6 +71,8 @@ struct User {
 #[derive(Debug, Clone)]
 enum SocketMessageType {
     NewMessage(SocketMessagePayload, String),
+    GuildDataUpdate(String),
+    UserGuildDataUpdate(String),
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +103,8 @@ async fn main() {
             post(post_channel_messages),
         )
         .route("/ws", get(socket_upgrade))
+        .route("/guilds/create", post(create_guild))
+        .route("/guilds/:guild_id/channels/create", post(create_channel))
         .route_layer(middleware::from_fn(auth));
 
     let app = Router::new()
@@ -256,6 +266,155 @@ async fn me(
             "memberships": user_query.memberships().unwrap()
         })),
     )
+}
+
+async fn create_guild(
+    Extension(state): Extension<Arc<State>>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<ItemCreatePayload>,
+) -> impl IntoResponse {
+    let prisma = &state.prisma;
+
+    let user_query = prisma
+        .user()
+        .find_unique(prisma::user::id::equals(claims.id))
+        .with(prisma::user::WithParam::Memberships(vec![]))
+        .exec()
+        .await;
+
+    if user_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "User not found."})),
+        );
+    }
+
+    let user_data = user_query.unwrap().unwrap();
+
+    let guild_query = prisma
+        .guild()
+        .create(
+            prisma::guild::name::set(payload.name),
+            prisma::guild::owner::link(prisma::user::UniqueWhereParam::IdEquals(
+                user_data.clone().id,
+            )),
+            vec![],
+        )
+        .exec()
+        .await;
+
+    if guild_query.is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "An error occured."})),
+        );
+    }
+
+    let guild_data = guild_query.unwrap();
+
+    prisma
+        .guild_membership()
+        .create(
+            prisma::guild_membership::user::link(prisma::user::UniqueWhereParam::IdEquals(
+                user_data.clone().id,
+            )),
+            prisma::guild_membership::guild::link(prisma::guild::UniqueWhereParam::IdEquals(
+                guild_data.clone().id,
+            )),
+            vec![],
+        )
+        .exec()
+        .await
+        .unwrap();
+
+    state
+        .tx
+        .send(SocketPayload {
+            message: SocketMessageType::UserGuildDataUpdate(user_data.clone().id),
+        })
+        .ok();
+
+    (StatusCode::CREATED, Json(json!(guild_data)))
+}
+
+async fn create_channel(
+    Extension(state): Extension<Arc<State>>,
+    Extension(claims): Extension<Claims>,
+    Path(guild_id): Path<String>,
+    Json(payload): Json<ItemCreatePayload>,
+) -> impl IntoResponse {
+    let prisma = &state.prisma;
+
+    let user_query = prisma
+        .user()
+        .find_unique(prisma::user::id::equals(claims.id))
+        .with(prisma::user::WithParam::Memberships(vec![]))
+        .exec()
+        .await;
+
+    if user_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "User not found."})),
+        );
+    }
+
+    let user_data = user_query.unwrap().unwrap();
+
+    let guild_query = prisma
+        .guild()
+        .find_unique(prisma::guild::id::equals(guild_id))
+        .with(prisma::guild::WithParam::Channels(vec![]))
+        .exec()
+        .await;
+
+    if guild_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Guild not found."})),
+        );
+    }
+
+    let guild_data = guild_query.unwrap().unwrap();
+
+    if guild_data.owner_id != user_data.id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({"error": "You do not have management permissions in the specified guild."}),
+            ),
+        );
+    }
+
+    let channel_query = prisma
+        .channel()
+        .create(
+            prisma::channel::name::set(payload.name),
+            prisma::channel::guild::link(prisma::guild::UniqueWhereParam::IdEquals(
+                guild_data.clone().id,
+            )),
+            vec![],
+        )
+        .exec()
+        .await;
+
+    if channel_query.is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "An error occured."})),
+        );
+    }
+
+    let channel_data = channel_query.unwrap();
+
+    state
+        .tx
+        .send(SocketPayload {
+            message: SocketMessageType::GuildDataUpdate(guild_data.id.to_owned()),
+        })
+        .ok();
+
+    (StatusCode::OK, Json(json!(channel_data)))
 }
 
 async fn get_user_guilds(
@@ -445,6 +604,7 @@ async fn post_channel_messages(
         .send(SocketPayload {
             message: SocketMessageType::NewMessage(
                 SocketMessagePayload {
+                    msg_type: "new_message".to_owned(),
                     author: User {
                         id: message_data.clone().author_id,
                         username: user_data.username,
@@ -473,10 +633,12 @@ async fn socket_upgrade(
 async fn websocket(mut socket: WebSocket, state: Arc<State>, claims: Claims) {
     let mut rx = state.tx.subscribe();
 
+    let user_id = &claims.id;
+
     let mut user_data = state
         .prisma
         .user()
-        .find_unique(prisma::user::id::equals(claims.id))
+        .find_unique(prisma::user::id::equals(user_id.to_owned()))
         .with(prisma::user::WithParam::Memberships(vec![]))
         .exec()
         .await
@@ -512,6 +674,77 @@ async fn websocket(mut socket: WebSocket, state: Arc<State>, claims: Claims) {
                     let socket_msg = json!(message_payload);
                     socket
                         .send(axum::extract::ws::Message::Text(socket_msg.to_string()))
+                        .await
+                        .ok();
+                }
+            }
+
+            SocketMessageType::GuildDataUpdate(updated_guild_id) => {
+                if user_guild_data.iter().any(|g| g.id == updated_guild_id) {
+                    user_guild_data = state
+                        .prisma
+                        .guild()
+                        .find_many(vec![prisma::guild::id::in_vec(
+                            user_data
+                                .memberships()
+                                .unwrap()
+                                .iter()
+                                .map(|m| m.guild_id.to_owned())
+                                .collect(),
+                        )])
+                        .with(prisma::guild::WithParam::Channels(vec![]))
+                        .exec()
+                        .await
+                        .unwrap();
+
+                    socket
+                        .send(axum::extract::ws::Message::Text(
+                            json!({
+                                "msg_type": "guild_data_update",
+                                "guild_id": updated_guild_id,
+                            })
+                            .to_string(),
+                        ))
+                        .await
+                        .ok();
+                }
+            }
+
+            SocketMessageType::UserGuildDataUpdate(updated_user_id) => {
+                if *user_id == updated_user_id {
+                    user_data = state
+                        .prisma
+                        .user()
+                        .find_unique(prisma::user::id::equals(user_id.to_owned()))
+                        .with(prisma::user::WithParam::Memberships(vec![]))
+                        .exec()
+                        .await
+                        .unwrap()
+                        .unwrap();
+
+                    user_guild_data = state
+                        .prisma
+                        .guild()
+                        .find_many(vec![prisma::guild::id::in_vec(
+                            user_data
+                                .memberships()
+                                .unwrap()
+                                .iter()
+                                .map(|m| m.guild_id.to_owned())
+                                .collect(),
+                        )])
+                        .with(prisma::guild::WithParam::Channels(vec![]))
+                        .exec()
+                        .await
+                        .unwrap();
+
+                    socket
+                        .send(axum::extract::ws::Message::Text(
+                            json!({
+                                "msg_type": "user_guild_data_update",
+                            })
+                            .to_string(),
+                        ))
                         .await
                         .ok();
                 }

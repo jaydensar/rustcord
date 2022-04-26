@@ -14,15 +14,19 @@ model User {
     password  String
     createdAt DateTime @default(now())
 
-    memberships GuildMembership[]
-    messages    Message[]
-
+    memberships    GuildMembership[]
+    messages       Message[]
+    ownedGuilds    Guild[]
+    createdInvites Invite[]
 }
 
 model Guild {
     id        String   @id @default(uuid())
     name      String
     createdAt DateTime @default(now())
+    owner     User     @relation(fields: [ownerId], references: [id])
+    ownerId   String
+
 
     members  GuildMembership[]
     channels Channel[]
@@ -32,9 +36,11 @@ model Guild {
 model Invite {
     code      String   @id @default(cuid())
     createdAt DateTime @default(now())
+    creator   User     @relation(fields: [userId], references: [id])
 
     guild   Guild  @relation(fields: [guildId], references: [id])
     guildId String
+    userId  String
 }
 
 model GuildMembership {
