@@ -12,12 +12,12 @@ use crate::{prisma, Claims, State, User};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SocketMessagePayload {
-    msg_type: String,
-    content: String,
-    author: User,
-    channel_id: String,
-    created_at: String,
-    id: String,
+    pub(crate) msg_type: String,
+    pub(crate) content: String,
+    pub(crate) author: User,
+    pub(crate) channel_id: String,
+    pub(crate) created_at: String,
+    pub(crate) id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -29,7 +29,7 @@ pub enum SocketMessageType {
 
 #[derive(Debug, Clone)]
 pub struct SocketPayload {
-    message: SocketMessageType,
+    pub(crate) message: SocketMessageType,
 }
 
 pub async fn upgrade(

@@ -26,7 +26,7 @@ pub struct Claims {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct User {
+pub struct User {
     id: String,
     username: String,
 }
