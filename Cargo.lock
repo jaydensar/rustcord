@@ -557,7 +557,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tungstenite",
- "url",
 ]
 
 [[package]]
@@ -4138,13 +4137,11 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
- "either",
  "hex",
  "hmac-sha256",
  "jsonwebtoken",
  "load-dotenv",
  "prisma-client-rust",
- "rand 0.8.5",
  "serde",
  "serde_json",
  "tokio",
