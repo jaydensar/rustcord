@@ -1,11 +1,11 @@
 use chrono::DateTime;
-use crossbeam_channel::{unbounded, Receiver};
 use eframe::{
     egui::{self, RichText, ScrollArea, Spinner, TextEdit, TextStyle},
     emath::Align,
     epaint::Color32,
     epi,
 };
+use flume::{unbounded, Receiver};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use std::{
