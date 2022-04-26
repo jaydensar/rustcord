@@ -22,11 +22,12 @@ struct Account {
 }
 
 #[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct Guild {
     name: String,
     id: String,
-    createdAt: String,
-    ownerId: String,
+    created_at: String,
+    owner_id: String,
     channels: Vec<Channel>,
 }
 
@@ -81,7 +82,7 @@ pub struct RustCord {
 const INSTANCE_URL: &str = "http://localhost:3000";
 
 impl epi::App for RustCord {
-    fn update(&mut self, ctx: &egui::Context, _frame: &epi::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &epi::Frame) {
         let Self {
             inputs,
             open_windows,
@@ -149,8 +150,12 @@ impl epi::App for RustCord {
 
                         *socket_channel = Some(r);
 
+                        let frame = frame.0.clone();
+
                         thread::spawn(move || loop {
                             let socket_msg = sock.read_message().unwrap().into_text().unwrap();
+
+                            frame.lock().unwrap().repaint_signal.request_repaint();
 
                             s.send(socket_msg).unwrap();
                         });
@@ -223,7 +228,7 @@ impl epi::App for RustCord {
                     };
                 });
 
-                if current_guild.is_some() && current_guild.as_ref().unwrap().ownerId == account.id
+                if current_guild.is_some() && current_guild.as_ref().unwrap().owner_id == account.id
                 {
                     ui.menu_button("Manage", |ui| {
                         if ui.button("Create Channel").clicked() {
@@ -422,17 +427,25 @@ impl epi::App for RustCord {
             *current_guild = Some(res.iter().find(|g| g.id == guild.id).unwrap().clone());
 
             self.guilds = res;
+
+            ctx.request_repaint();
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            let guild_name = current_guild.as_ref().unwrap().name.to_owned();
+
             if current_channel.is_none() {
-                ui.heading("Select a channel");
+                ui.heading(format!("{}: Select a channel", guild_name));
                 return;
             }
 
             let current_channel = current_channel.as_ref().unwrap();
 
-            ui.heading(format!("#{}", current_channel.name.to_owned()));
+            ui.heading(format!(
+                "{}: #{}",
+                guild_name,
+                current_channel.name.to_owned()
+            ));
 
             ui.add_space(4.0);
 
@@ -495,8 +508,8 @@ impl epi::App for RustCord {
     fn setup(
         &mut self,
         _ctx: &egui::Context,
-        _frame: &epi::Frame,
-        _storage: Option<&dyn epi::Storage>,
+        frame: &epi::Frame,
+        storage: Option<&dyn epi::Storage>,
     ) {
         self.inputs.insert("username".to_owned(), "".to_owned());
         self.inputs.insert("password".to_owned(), "".to_owned());
@@ -507,18 +520,72 @@ impl epi::App for RustCord {
 
         self.http = reqwest::blocking::Client::new();
 
-        // re-add when token is stored
-        // self.guilds = self
-        //     .http
-        //     .get(format!("{}/{}", INSTANCE_URL, "users/me/guilds"))
-        //     .header(
-        //         "Authorization",
-        //         format!("Bearer {}", self.account.as_ref().unwrap().token),
-        //     )
-        //     .send()
-        //     .unwrap()
-        //     .json()
-        //     .unwrap();
+        let stored_token = storage.unwrap().get_string("token");
+
+        if stored_token.is_some() && stored_token.unwrap() != *"" {
+            let token = storage.unwrap().get_string("token").unwrap();
+            let user_req = self
+                .http
+                .get(format!("{}/users/me", INSTANCE_URL))
+                .header("Authorization", format!("Bearer {}", token))
+                .send()
+                .unwrap()
+                .json::<User>();
+
+            if user_req.is_err() {
+                return;
+            }
+
+            let user = user_req.unwrap();
+
+            self.account = Some(Account {
+                id: user.id,
+                username: user.username,
+                token,
+            });
+
+            self.guilds = self
+                .http
+                .get(format!("{}/{}", INSTANCE_URL, "users/me/guilds"))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", self.account.as_ref().unwrap().token),
+                )
+                .send()
+                .unwrap()
+                .json()
+                .unwrap();
+
+            let mut request = "ws://localhost:3000/ws".into_client_request().unwrap();
+
+            request.headers_mut().append(
+                "Authorization",
+                HeaderValue::from_str(&self.account.as_ref().unwrap().token).unwrap(),
+            );
+
+            let (mut sock, _response) = connect(request).unwrap();
+
+            let (s, r) = unbounded();
+
+            self.socket_channel = Some(r);
+
+            let frame = frame.0.clone();
+
+            thread::spawn(move || loop {
+                let socket_msg = sock.read_message().unwrap().into_text().unwrap();
+
+                frame.lock().unwrap().repaint_signal.request_repaint();
+
+                s.send(socket_msg).unwrap();
+            });
+        }
+    }
+
+    fn save(&mut self, storage: &mut dyn epi::Storage) {
+        println!("Saving data...");
+        if let Some(account) = &self.account {
+            storage.set_string("token", account.token.to_owned());
+        }
     }
 
     fn name(&self) -> &str {
