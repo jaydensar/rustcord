@@ -8,7 +8,7 @@ use axum::{
     http::{self, Request, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use hmac_sha256::Hash;
@@ -104,6 +104,7 @@ async fn main() {
         )
         .route("/ws", get(socket_upgrade))
         .route("/guilds/create", post(create_guild))
+        .route("/guilds/:guild_id/delete", delete(delete_guild))
         .route("/guilds/:guild_id/channels/create", post(create_channel))
         .route_layer(middleware::from_fn(auth));
 
@@ -337,6 +338,72 @@ async fn create_guild(
         .ok();
 
     (StatusCode::CREATED, Json(json!(guild_data)))
+}
+
+async fn delete_guild(
+    Extension(state): Extension<Arc<State>>,
+    Extension(claims): Extension<Claims>,
+    Path(guild_id): Path<String>,
+) -> impl IntoResponse {
+    let prisma = &state.prisma;
+
+    let user_query = prisma
+        .user()
+        .find_unique(prisma::user::id::equals(claims.id))
+        .with(prisma::user::WithParam::Memberships(vec![]))
+        .exec()
+        .await;
+
+    if user_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "User not found."})),
+        );
+    }
+
+    let user_data = user_query.unwrap().unwrap();
+
+    let guild_query = prisma
+        .guild()
+        .find_unique(prisma::guild::id::equals(guild_id.to_owned()))
+        .with(prisma::guild::WithParam::Owner)
+        .exec()
+        .await;
+
+    if guild_query.is_err() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "Guild not found."})),
+        );
+    }
+
+    let guild_data = guild_query.unwrap().unwrap();
+
+    if guild_data.owner().unwrap().id != user_data.id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "You are not the owner of this guild."})),
+        );
+    }
+
+    prisma
+        .guild()
+        .find_unique(prisma::guild::UniqueWhereParam::IdEquals(
+            guild_data.clone().id,
+        ))
+        .delete()
+        .exec()
+        .await
+        .unwrap();
+
+    state
+        .tx
+        .send(SocketPayload {
+            message: SocketMessageType::UserGuildDataUpdate(user_data.clone().id),
+        })
+        .ok();
+
+    (StatusCode::OK, Json(json!(guild_data)))
 }
 
 async fn create_channel(
