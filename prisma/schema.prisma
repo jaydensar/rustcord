@@ -24,7 +24,7 @@ model Guild {
     id        String   @id @default(uuid())
     name      String
     createdAt DateTime @default(now())
-    owner     User     @relation(fields: [ownerId], references: [id])
+    owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
     ownerId   String
 
 
@@ -36,9 +36,9 @@ model Guild {
 model Invite {
     code      String   @id @default(cuid())
     createdAt DateTime @default(now())
-    creator   User     @relation(fields: [userId], references: [id])
+    creator   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-    guild   Guild  @relation(fields: [guildId], references: [id])
+    guild   Guild  @relation(fields: [guildId], references: [id], onDelete: Cascade)
     guildId String
     userId  String
 }
@@ -47,8 +47,8 @@ model GuildMembership {
     nickname  String?
     createdAt DateTime @default(now())
 
-    user    User   @relation(fields: [userId], references: [id])
-    guild   Guild  @relation(fields: [guildId], references: [id])
+    user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+    guild   Guild  @relation(fields: [guildId], references: [id], onDelete: Cascade)
     userId  String
     guildId String
 
@@ -61,7 +61,7 @@ model Channel {
     createdAt DateTime @default(now())
 
     messages Message[]
-    guild    Guild     @relation(fields: [guildId], references: [id])
+    guild    Guild     @relation(fields: [guildId], references: [id], onDelete: Cascade)
     guildId  String
 }
 
@@ -70,8 +70,8 @@ model Message {
     content   String
     createdAt DateTime @default(now())
 
-    author    User    @relation(fields: [authorId], references: [id])
-    channel   Channel @relation(fields: [channelId], references: [id])
+    author    User    @relation(fields: [authorId], references: [id], onDelete: SetNull)
+    channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
     authorId  String
     channelId String
 }
