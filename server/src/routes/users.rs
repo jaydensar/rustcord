@@ -3,44 +3,30 @@ use std::sync::Arc;
 use axum::{http::StatusCode, response::IntoResponse, Extension, Json};
 use serde_json::json;
 
-use crate::{prisma, Claims, State};
+use crate::{prisma, State};
 
-pub async fn me(
-    Extension(state): Extension<Arc<State>>,
-    Extension(claims): Extension<Claims>,
-) -> impl IntoResponse {
-    let prisma = &state.prisma;
-
-    let user_query = prisma
-        .user()
-        .find_unique(prisma::user::username::equals(claims.username))
-        .with(prisma::user::WithParam::Memberships(vec![]))
-        .exec()
-        .await
-        .unwrap()
-        .unwrap();
-
+pub async fn me(Extension(user_data): Extension<prisma::user::Data>) -> impl IntoResponse {
     (
         StatusCode::OK,
         Json(json!({
-            "id": user_query.id,
-            "username": user_query.username,
-            "createdAt": user_query.created_at.to_string(),
-            "memberships": user_query.memberships().unwrap()
+            "id": user_data.id,
+            "username": user_data.username,
+            "createdAt": user_data.created_at.to_string(),
+            "memberships": user_data.memberships().unwrap()
         })),
     )
 }
 
 pub async fn get_user_guilds(
     Extension(state): Extension<Arc<State>>,
-    Extension(claims): Extension<Claims>,
+    Extension(user_data): Extension<prisma::user::Data>,
 ) -> impl IntoResponse {
     let prisma = &state.prisma;
 
     let guilds_query = prisma
         .guild()
         .find_many(vec![prisma::guild::members::every(vec![
-            prisma::guild_membership::user_id::equals(claims.id),
+            prisma::guild_membership::user_id::equals(user_data.id),
         ])])
         .with(prisma::guild::WithParam::Channels(vec![]))
         .exec()

@@ -8,7 +8,7 @@ use axum::{
 use serde::Serialize;
 use serde_json::json;
 
-use crate::{prisma, Claims, State, User};
+use crate::{prisma, State, User};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SocketMessagePayload {
@@ -35,25 +35,15 @@ pub struct SocketPayload {
 pub async fn upgrade(
     ws: WebSocketUpgrade,
     Extension(state): Extension<Arc<State>>,
-    Extension(claims): Extension<Claims>,
+    Extension(user_data): Extension<prisma::user::Data>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| websocket(socket, state, claims))
+    ws.on_upgrade(|socket| websocket(socket, state, user_data))
 }
 
-async fn websocket(mut socket: WebSocket, state: Arc<State>, claims: Claims) {
+async fn websocket(mut socket: WebSocket, state: Arc<State>, mut user_data: prisma::user::Data) {
     let mut rx = state.tx.subscribe();
 
-    let user_id = &claims.id;
-
-    let mut user_data = state
-        .prisma
-        .user()
-        .find_unique(prisma::user::id::equals(user_id.to_owned()))
-        .with(prisma::user::WithParam::Memberships(vec![]))
-        .exec()
-        .await
-        .unwrap()
-        .unwrap();
+    let user_id = user_data.clone().id;
 
     let mut user_guild_data = state
         .prisma

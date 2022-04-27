@@ -94,7 +94,7 @@ pub async fn login(
         &Claims {
             username: user_data.username.to_owned(),
             id: user_data.id.to_owned(),
-            exp: (chrono::offset::Utc::now().timestamp() + (15 * 60)) as usize,
+            exp: (chrono::offset::Utc::now().timestamp() + (7 * 86400)) as usize,
         },
         &EncodingKey::from_secret(env!("JWT_SECRET").as_ref()),
     )

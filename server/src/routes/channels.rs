@@ -4,7 +4,7 @@ use axum::{extract::Path, http::StatusCode, response::IntoResponse, Extension, J
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{prisma, Claims, State, User};
+use crate::{prisma, State, User};
 
 use super::socket::{SocketMessagePayload, SocketMessageType, SocketPayload};
 
@@ -15,24 +15,10 @@ pub struct MessagePayload {
 
 pub async fn get_channel_messages(
     Path(channel_id): Path<String>,
-    Extension(claims): Extension<Claims>,
+    Extension(user_data): Extension<prisma::user::Data>,
     Extension(state): Extension<Arc<State>>,
 ) -> impl IntoResponse {
     let prisma = &state.prisma;
-
-    let user_query = prisma
-        .user()
-        .find_unique(prisma::user::id::equals(claims.id))
-        .with(prisma::user::WithParam::Memberships(vec![]))
-        .exec()
-        .await;
-
-    if user_query.is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "User not found."})),
-        );
-    }
 
     let channel_query = prisma
         .channel()
@@ -48,7 +34,6 @@ pub async fn get_channel_messages(
     }
 
     let channel_data = channel_query.unwrap().unwrap();
-    let user_data = user_query.unwrap().unwrap();
 
     let user_memberships = user_data.memberships().unwrap();
 
@@ -99,25 +84,11 @@ pub async fn get_channel_messages(
 
 pub async fn post_channel_messages(
     Extension(state): Extension<Arc<State>>,
-    Extension(claims): Extension<Claims>,
+    Extension(user_data): Extension<prisma::user::Data>,
     Json(payload): Json<MessagePayload>,
     Path(channel_id): Path<String>,
 ) -> impl IntoResponse {
     let prisma = &state.prisma;
-
-    let user_query = prisma
-        .user()
-        .find_unique(prisma::user::id::equals(claims.id))
-        .with(prisma::user::WithParam::Memberships(vec![]))
-        .exec()
-        .await;
-
-    if user_query.is_err() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "User not found."})),
-        );
-    }
 
     let channel_query = prisma
         .channel()
@@ -133,7 +104,6 @@ pub async fn post_channel_messages(
     }
 
     let channel_data = channel_query.unwrap().unwrap();
-    let user_data = user_query.unwrap().unwrap();
 
     let user_memberships = user_data.memberships().unwrap();
 
