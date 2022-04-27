@@ -6,6 +6,7 @@ use eframe::{
     epi,
 };
 use flume::{unbounded, Receiver};
+use log::{debug, info, trace};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -21,7 +22,7 @@ struct Account {
     token: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 struct Guild {
     name: String,
@@ -46,7 +47,7 @@ struct SocketTypePayload {
     msg_type: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug)]
 struct Channel {
     name: String,
     id: String,
@@ -64,6 +65,11 @@ struct Message {
     content: String,
     created_at: String,
     author: User,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct Invite {
+    code: String,
 }
 
 #[derive(Default)]
@@ -124,6 +130,8 @@ impl epi::App for RustCord {
                             .json(&data)
                             .send();
 
+                        trace!("Logged in: {:?}", req);
+
                         self.account = Some(req.unwrap().json::<Account>().unwrap());
 
                         self.guilds = http
@@ -136,6 +144,8 @@ impl epi::App for RustCord {
                             .unwrap()
                             .json()
                             .unwrap();
+
+                        trace!("Fetched guilds: {:?}", self.guilds);
 
                         let mut request = "ws://localhost:3000/ws".into_client_request().unwrap();
 
@@ -168,10 +178,13 @@ impl epi::App for RustCord {
 
                         ui.add(Spinner::new());
 
-                        http.post(format!("{}/{}", INSTANCE_URL, "register"))
+                        let res = http
+                            .post(format!("{}/{}", INSTANCE_URL, "register"))
                             .json(&data)
                             .send()
                             .unwrap();
+
+                        trace!("Registered: {:?}", res);
                     }
                 });
             });
@@ -190,7 +203,7 @@ impl epi::App for RustCord {
         let account = self.account.as_ref().unwrap();
 
         if type_payload.msg_type == "user_guild_data_update" {
-            println!("user guild update");
+            debug!("received user guild update, updating guilds");
             *guilds = http
                 .get(format!("{}/{}", INSTANCE_URL, "users/me/guilds"))
                 .header(
@@ -255,15 +268,18 @@ impl epi::App for RustCord {
                         let mut data = HashMap::new();
                         data.insert("name", inputs.get("channel_name").unwrap());
 
-                        http.post(format!(
-                            "{}/guilds/{}/channels/create",
-                            INSTANCE_URL,
-                            current_guild.as_ref().unwrap().id
-                        ))
-                        .json(&data)
-                        .header("Authorization", format!("Bearer {}", account.token))
-                        .send()
-                        .unwrap();
+                        let res = http
+                            .post(format!(
+                                "{}/guilds/{}/channels/create",
+                                INSTANCE_URL,
+                                current_guild.as_ref().unwrap().id
+                            ))
+                            .json(&data)
+                            .header("Authorization", format!("Bearer {}", account.token))
+                            .send()
+                            .unwrap();
+
+                        trace!("Created channel: {:?}", res);
 
                         let guild = current_guild.as_ref().unwrap();
 
@@ -292,13 +308,47 @@ impl epi::App for RustCord {
                     );
 
                     ui.horizontal(|ui| {
-                        if ui.button("Join").clicked() {}
+                        if ui.button("Join").clicked() {
+                            let mut data = HashMap::new();
+                            data.insert("code", inputs.get("invite_code").unwrap());
+
+                            let res = http
+                                .post(format!("{}/guilds/join", INSTANCE_URL))
+                                .json(&data)
+                                .header("Authorization", format!("Bearer {}", account.token))
+                                .send()
+                                .unwrap();
+
+                            trace!("Joined guild: {:?}", res);
+
+                            open_windows.remove("join_guild");
+                            inputs.get_mut("invite_code").unwrap().clear();
+                        }
 
                         if ui.button("Cancel").clicked() {
                             open_windows.remove("join_guild");
                             inputs.get_mut("invite_code").unwrap().clear();
                         }
                     });
+                })
+                .unwrap();
+        }
+
+        if open_windows.contains("create_invite") {
+            egui::Window::new("Invite")
+                .show(ctx, |ui| {
+                    let invite_code = inputs.get_mut("created_invite").unwrap();
+
+                    ui.add(
+                        TextEdit::singleline(invite_code)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(1),
+                    );
+
+                    if ui.button("Close").clicked() {
+                        open_windows.remove("create_invite");
+                        inputs.get_mut("created_invite").unwrap().clear();
+                    }
                 })
                 .unwrap();
         }
@@ -325,7 +375,7 @@ impl epi::App for RustCord {
                                 .send()
                                 .unwrap();
 
-                            println!("{:?}", res);
+                            trace!("Created guild: {:?}", res);
 
                             open_windows.remove("create_guild");
                             inputs.get_mut("guild_name").unwrap().clear();
@@ -370,6 +420,8 @@ impl epi::App for RustCord {
                         .json()
                         .unwrap();
 
+                    trace!("Fetched messages: {:?}", messages);
+
                     messages.sort_by(|a, b| {
                         DateTime::parse_from_rfc3339(&a.created_at)
                             .unwrap()
@@ -411,11 +463,33 @@ impl epi::App for RustCord {
                     ui.label(RichText::new(account.username.to_owned()).color(Color32::WHITE));
                 });
                 egui::warn_if_debug_build(ui);
+                if ui.button("Create Invite").clicked() {
+                    let invite: Invite = http
+                        .post(format!(
+                            "{}/guilds/{}/invites/create",
+                            INSTANCE_URL,
+                            current_guild.as_ref().unwrap().id,
+                        ))
+                        .header("Authorization", format!("Bearer {}", account.token))
+                        .send()
+                        .unwrap()
+                        .json()
+                        .unwrap();
+
+                    trace!("Created invite: {:?}", invite);
+
+                    inputs
+                        .insert("created_invite".to_owned(), invite.code)
+                        .unwrap()
+                        .clear();
+
+                    open_windows.insert("create_invite".to_string());
+                }
             });
         });
 
         if type_payload.msg_type == "guild_data_update" {
-            println!("guild_data_update");
+            debug!("Received guild data update");
             let res: Vec<Guild> = http
                 .get(format!("{}/{}", INSTANCE_URL, "users/me/guilds"))
                 .header("Authorization", format!("Bearer {}", account.token))
@@ -423,6 +497,8 @@ impl epi::App for RustCord {
                 .unwrap()
                 .json()
                 .unwrap();
+
+            trace!("Fetched guilds: {:?}", res);
 
             *current_guild = Some(res.iter().find(|g| g.id == guild.id).unwrap().clone());
 
@@ -491,14 +567,17 @@ impl epi::App for RustCord {
 
                 ui.with_layout(egui::Layout::right_to_left(), |ui| ui.add(Spinner::new()));
 
-                http.post(format!(
-                    "{}/channels/{}/messages",
-                    INSTANCE_URL, current_channel.id
-                ))
-                .header("Authorization", format!("Bearer {}", account.token))
-                .json(&data)
-                .send()
-                .unwrap();
+                let res = http
+                    .post(format!(
+                        "{}/channels/{}/messages",
+                        INSTANCE_URL, current_channel.id
+                    ))
+                    .header("Authorization", format!("Bearer {}", account.token))
+                    .json(&data)
+                    .send()
+                    .unwrap();
+
+                trace!("Posted message, response: {:?}", res);
 
                 *inputs.get_mut("chatbox").unwrap() = "".to_owned();
             }
@@ -517,12 +596,16 @@ impl epi::App for RustCord {
         self.inputs.insert("invite_code".to_owned(), "".to_owned());
         self.inputs.insert("guild_name".to_owned(), "".to_owned());
         self.inputs.insert("channel_name".to_owned(), "".to_owned());
+        self.inputs
+            .insert("created_invite".to_owned(), "".to_owned());
 
         self.http = reqwest::blocking::Client::new();
 
-        let stored_token = storage.unwrap().get_string("token");
+        // let stored_token = storage.unwrap().get_string("token");
+        let stored_token = Some("".to_owned());
 
         if stored_token.is_some() && stored_token.unwrap() != *"" {
+            info!("Logging in with stored token");
             let token = storage.unwrap().get_string("token").unwrap();
             let user_req = self
                 .http
@@ -571,18 +654,21 @@ impl epi::App for RustCord {
 
             let frame = frame.0.clone();
 
+            info!("Established websocket connection");
+
             thread::spawn(move || loop {
                 let socket_msg = sock.read_message().unwrap().into_text().unwrap();
 
                 frame.lock().unwrap().repaint_signal.request_repaint();
 
+                trace!("Received socket message: {}", socket_msg);
                 s.send(socket_msg).unwrap();
             });
         }
     }
 
     fn save(&mut self, storage: &mut dyn epi::Storage) {
-        println!("Saving data...");
+        info!("Saving token to storage");
         if let Some(account) = &self.account {
             storage.set_string("token", account.token.to_owned());
         }
