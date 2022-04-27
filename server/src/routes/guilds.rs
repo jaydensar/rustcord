@@ -114,7 +114,7 @@ pub async fn delete_guild(
     state
         .tx
         .send(SocketPayload {
-            message: SocketMessageType::UserGuildDataUpdate(user_data.clone().id),
+            message: SocketMessageType::GuildDataUpdate(guild_data.id.to_owned()),
         })
         .ok();
 

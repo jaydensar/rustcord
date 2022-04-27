@@ -103,6 +103,7 @@ impl epi::App for RustCord {
 
         if account.is_none() {
             egui::Window::new("Login or Register").show(ctx, |ui| {
+                egui::warn_if_debug_build(ui);
                 ui.add(
                     TextEdit::singleline(inputs.get_mut("username").unwrap())
                         .desired_width(f32::INFINITY)
@@ -248,10 +249,12 @@ impl epi::App for RustCord {
                             open_windows.insert("create_channel".to_owned());
                         }
                         if ui.button("Delete Guild").clicked() {
-                            open_windows.insert("delete_channel".to_owned());
+                            open_windows.insert("delete_guild".to_owned());
                         }
                     });
                 }
+
+                egui::warn_if_debug_build(ui);
             });
         });
 
@@ -390,6 +393,45 @@ impl epi::App for RustCord {
                 .unwrap();
         }
 
+        if open_windows.contains("delete_guild") {
+            egui::Window::new("Delete Guild")
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Deleting guild {} ({}). This is an irreversable action and will remove all channels and members. Are you sure?",
+                        current_guild.as_ref().unwrap().name,
+                        current_guild.as_ref().unwrap().id
+                    ));
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            let mut data = HashMap::new();
+                            data.insert("name", inputs.get("guild_name").unwrap());
+
+                            let res = http
+                                .delete(format!(
+                                    "{}/guilds/{}/delete",
+                                    INSTANCE_URL,
+                                    current_guild.as_ref().unwrap().id
+                                ))
+                                .header("Authorization", format!("Bearer {}", account.token))
+                                .json(&data)
+                                .send()
+                                .unwrap();
+
+                            trace!("Deleted guild: {:?}", res);
+
+                            open_windows.remove("delete_guild");
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            open_windows.remove("delete_guild");
+                            inputs.get_mut("guild_name").unwrap().clear();
+                        }
+                    });
+                })
+                .unwrap();
+        }
+
         if current_guild.is_none() {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.with_layout(
@@ -462,7 +504,6 @@ impl epi::App for RustCord {
                     ui.label("Logged in as ");
                     ui.label(RichText::new(account.username.to_owned()).color(Color32::WHITE));
                 });
-                egui::warn_if_debug_build(ui);
                 if ui.button("Create Invite").clicked() {
                     let invite: Invite = http
                         .post(format!(
@@ -500,11 +541,20 @@ impl epi::App for RustCord {
 
             trace!("Fetched guilds: {:?}", res);
 
-            *current_guild = Some(res.iter().find(|g| g.id == guild.id).unwrap().clone());
+            if let Some(guild) = current_guild {
+                if !res.iter().any(|g| g.id == guild.id) {
+                    *current_guild = None;
+                    *current_channel = None;
+                } else {
+                    *current_guild = Some(res.iter().find(|g| g.id == guild.id).unwrap().clone());
+                }
+            }
 
             self.guilds = res;
 
             ctx.request_repaint();
+
+            return;
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
