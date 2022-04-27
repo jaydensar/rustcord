@@ -25,7 +25,7 @@ pub async fn get_user_guilds(
 
     let guilds_query = prisma
         .guild()
-        .find_many(vec![prisma::guild::members::every(vec![
+        .find_many(vec![prisma::guild::members::some(vec![
             prisma::guild_membership::user_id::equals(user_data.id),
         ])])
         .with(prisma::guild::WithParam::Channels(vec![]))
