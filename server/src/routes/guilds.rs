@@ -245,7 +245,7 @@ pub async fn join_guild(
         .guild_membership()
         .create(
             prisma::guild_membership::user::link(prisma::user::UniqueWhereParam::IdEquals(
-                user_data.id,
+                user_data.clone().id,
             )),
             prisma::guild_membership::guild::link(prisma::guild::UniqueWhereParam::IdEquals(
                 guild_data.clone().id,
@@ -267,7 +267,7 @@ pub async fn join_guild(
     state
         .tx
         .send(SocketPayload {
-            message: SocketMessageType::GuildDataUpdate(guild_data.clone().id),
+            message: SocketMessageType::UserGuildDataUpdate(user_data.clone().id),
         })
         .ok();
 
