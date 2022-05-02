@@ -196,14 +196,14 @@ impl epi::App for RustCord {
 
         let msg = socket.try_recv().unwrap_or_else(|_| "".to_owned());
 
-        let type_payload: SocketTypePayload =
+        let update_payload: SocketTypePayload =
             serde_json::from_str(&msg).unwrap_or(SocketTypePayload {
                 msg_type: "".to_string(),
             });
 
         let account = self.account.as_ref().unwrap();
 
-        if type_payload.msg_type == "user_guild_data_update" {
+        if update_payload.msg_type == "user_guild_data_update" {
             debug!("received user guild update, updating guilds");
             *guilds = http
                 .get(format!("{}/{}", INSTANCE_URL, "users/me/guilds"))
@@ -432,6 +432,32 @@ impl epi::App for RustCord {
                 .unwrap();
         }
 
+        if update_payload.msg_type == "guild_data_update" {
+            debug!("Received guild data update");
+            let res: Vec<Guild> = http
+                .get(format!("{}/{}", INSTANCE_URL, "users/me/guilds"))
+                .header("Authorization", format!("Bearer {}", account.token))
+                .send()
+                .unwrap()
+                .json()
+                .unwrap();
+
+            trace!("Fetched guilds: {:?}", res);
+
+            if let Some(guild) = current_guild {
+                if !res.iter().any(|g| g.id == guild.id) {
+                    *current_guild = None;
+                    *current_channel = None;
+                } else {
+                    *current_guild = Some(res.iter().find(|g| g.id == guild.id).unwrap().clone());
+                }
+            }
+
+            self.guilds = res;
+
+            ctx.request_repaint();
+        }
+
         if current_guild.is_none() {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.with_layout(
@@ -474,7 +500,7 @@ impl epi::App for RustCord {
                 };
             }
 
-            if type_payload.msg_type == "new_message" {
+            if update_payload.msg_type == "new_message" {
                 let data: SocketMessagePayload = serde_json::from_str(&msg).unwrap();
 
                 if message_cache.contains_key(&data.channel_id) {
@@ -529,34 +555,6 @@ impl epi::App for RustCord {
             });
         });
 
-        if type_payload.msg_type == "guild_data_update" {
-            debug!("Received guild data update");
-            let res: Vec<Guild> = http
-                .get(format!("{}/{}", INSTANCE_URL, "users/me/guilds"))
-                .header("Authorization", format!("Bearer {}", account.token))
-                .send()
-                .unwrap()
-                .json()
-                .unwrap();
-
-            trace!("Fetched guilds: {:?}", res);
-
-            if let Some(guild) = current_guild {
-                if !res.iter().any(|g| g.id == guild.id) {
-                    *current_guild = None;
-                    *current_channel = None;
-                } else {
-                    *current_guild = Some(res.iter().find(|g| g.id == guild.id).unwrap().clone());
-                }
-            }
-
-            self.guilds = res;
-
-            ctx.request_repaint();
-
-            return;
-        }
-
         egui::CentralPanel::default().show(ctx, |ui| {
             let guild_name = current_guild.as_ref().unwrap().name.to_owned();
 
@@ -596,41 +594,43 @@ impl epi::App for RustCord {
                                 RichText::new(format!("[{}]", message.author.username.to_owned()))
                                     .color(Color32::WHITE),
                             );
-                            ui.label(message.content.to_owned());
+                            ui.add(egui::Label::new(message.content.to_owned()).wrap(true));
                         });
                     }
                 });
 
-            let textbox = ui.add(
-                TextEdit::multiline(inputs.get_mut("chatbox").unwrap())
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(1)
-                    .hint_text(format!("Message #{}", current_channel.name)),
-            );
-            // enter sends message, shift+enter creates a new line
-            if textbox.has_focus()
-                && ctx.input().key_pressed(egui::Key::Enter)
-                && !ctx.input().modifiers.shift
-            {
-                let mut data = HashMap::new();
-                data.insert("content", inputs.get("chatbox").unwrap().trim());
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                let textbox = ui.add(
+                    TextEdit::multiline(inputs.get_mut("chatbox").unwrap())
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(1)
+                        .hint_text(format!("Message #{}", current_channel.name)),
+                );
+                // enter sends message, shift+enter creates a new line
+                if textbox.has_focus()
+                    && ctx.input().key_pressed(egui::Key::Enter)
+                    && !ctx.input().modifiers.shift
+                {
+                    let mut data = HashMap::new();
+                    data.insert("content", inputs.get("chatbox").unwrap().trim());
 
-                ui.with_layout(egui::Layout::right_to_left(), |ui| ui.add(Spinner::new()));
+                    ui.with_layout(egui::Layout::right_to_left(), |ui| ui.add(Spinner::new()));
 
-                let res = http
-                    .post(format!(
-                        "{}/channels/{}/messages",
-                        INSTANCE_URL, current_channel.id
-                    ))
-                    .header("Authorization", format!("Bearer {}", account.token))
-                    .json(&data)
-                    .send()
-                    .unwrap();
+                    let res = http
+                        .post(format!(
+                            "{}/channels/{}/messages",
+                            INSTANCE_URL, current_channel.id
+                        ))
+                        .header("Authorization", format!("Bearer {}", account.token))
+                        .json(&data)
+                        .send()
+                        .unwrap();
 
-                trace!("Posted message, response: {:?}", res);
+                    trace!("Posted message, response: {:?}", res);
 
-                *inputs.get_mut("chatbox").unwrap() = "".to_owned();
-            }
+                    *inputs.get_mut("chatbox").unwrap() = "".to_owned();
+                }
+            });
         });
     }
 
